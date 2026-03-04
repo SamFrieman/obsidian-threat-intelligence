@@ -1,0 +1,27 @@
+{
+  "name": "obsidian-kepler-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "KeplerGL microfrontend for OBSIDIAN threat intelligence platform",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:watch": "vite build --watch",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@reduxjs/toolkit": "^2.0.1",
+    "kepler.gl": "^3.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-redux": "^9.0.4",
+    "redux": "^5.0.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "vite": "^5.0.11"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
