@@ -1,0 +1,142 @@
+# .github/workflows/dependency_check.yml
+# Safe dependency management — scan, test, open PR. Never auto-merges.
+name: Dependency Health Check
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'   # Every Monday 09:00 UTC
+  workflow_dispatch:
+    inputs:
+      upgrade_type:
+        description: 'Upgrade scope (patch / minor / all)'
+        required: true
+        default: 'patch'
+        type: choice
+        options: [patch, minor, all]
+
+env:
+  PYTHON_VERSION: '3.11'
+  UPGRADE_TYPE: ${{ github.event.inputs.upgrade_type || 'patch' }}
+
+jobs:
+  scan-and-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install current dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Snapshot current freeze
+        run: pip freeze > /tmp/freeze_before.txt
+
+      - name: List outdated packages
+        id: outdated
+        run: |
+          pip list --outdated --format=json > /tmp/outdated.json
+          TOTAL=$(python -c "import json; print(len(json.load(open('/tmp/outdated.json'))))")
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "Outdated: $TOTAL packages" >> $GITHUB_STEP_SUMMARY
+
+      - name: Exit if nothing to upgrade
+        if: steps.outdated.outputs.total == '0'
+        run: echo "All packages current. No PR needed." && exit 0
+
+      - name: Apply eligible upgrades to requirements.txt
+        run: |
+          python << 'SCRIPT'
+          import json, re
+
+          utype    = '${{ env.UPGRADE_TYPE }}'
+          outdated = json.load(open('/tmp/outdated.json'))
+          lines    = open('requirements.txt').readlines()
+          new      = list(lines)
+          updated  = []
+
+          def eligible(cur, lat, t):
+              try:
+                  c = [int(x) for x in cur.split('.')]
+                  l = [int(x) for x in lat.split('.')]
+              except:
+                  return False
+              if t == 'patch': return c[0]==l[0] and c[1]==l[1] and l[2]>c[2]
+              if t == 'minor': return c[0]==l[0] and (l[1]>c[1] or (l[1]==c[1] and l[2]>c[2]))
+              return True  # 'all'
+
+          for pkg in outdated:
+              if not eligible(pkg['version'], pkg['latest_version'], utype):
+                  continue
+              for i, line in enumerate(new):
+                  if re.match(r'^' + re.escape(pkg['name']) + r'==', line, re.I):
+                      new[i] = re.sub(r'==\S+', f"=={pkg['latest_version']}", line)
+                      updated.append(f"{pkg['name']} {pkg['version']} -> {pkg['latest_version']}")
+                      break
+
+          open('requirements.txt','w').writelines(new)
+          print('\n'.join(updated) if updated else 'No eligible upgrades')
+          open('/tmp/updated.txt','w').write('\n'.join(updated))
+          SCRIPT
+
+      - name: Install upgraded dependencies
+        run: pip install -r requirements.txt
+
+      - name: Snapshot new freeze
+        run: pip freeze > /tmp/freeze_after.txt
+
+      - name: Run test suite
+        env:
+          DJANGO_SETTINGS_MODULE: core.settings
+          SECRET_KEY: ci-test-key-not-for-production
+          DEBUG: 'True'
+        run: |
+          python manage.py test --verbosity=1
+
+      - name: Generate diff summary
+        run: |
+          diff /tmp/freeze_before.txt /tmp/freeze_after.txt > /tmp/freeze_diff.txt || true
+
+      - name: Open Pull Request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(deps): ${{ env.UPGRADE_TYPE }} upgrades [automated]"
+          branch: chore/deps-${{ env.UPGRADE_TYPE }}-${{ github.run_number }}
+          title: "chore(deps): ${{ env.UPGRADE_TYPE }} dependency upgrades"
+          body: |
+            ## Automated Dependency Upgrade
+
+            **Scope:** `${{ env.UPGRADE_TYPE }}`  
+            **Triggered by:** ${{ github.event_name }}  
+            **Tests:** Passed before this PR was opened
+
+            ### Changes
+            ```
+            $(cat /tmp/updated.txt)
+            ```
+
+            ### Pip freeze diff
+            ```diff
+            $(cat /tmp/freeze_diff.txt | head -60)
+            ```
+
+            ---
+            ⚠️ **Human review required before merging.**  
+            - Verify changelogs for breaking changes  
+            - Test in staging after merge  
+            - This PR will **not** auto-merge
+          labels: dependencies,automated
+          draft: false
+          delete-branch: true
